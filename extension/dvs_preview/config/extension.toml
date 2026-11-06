@@ -6,10 +6,12 @@ category = "Simulation"
 keywords = ["dvs", "event camera", "isaac lab", "isaac sim"]
 authors = ["SPIKE Lab, JHU"]
 
-# No [dependencies] block: omni.ui / omni.usd / omni.kit.app / omni.replicator.core
-# are already loaded by Isaac Sim at runtime, and omni.kit.app is a kit-kernel
-# module that the dependency resolver can't version-resolve (would fail to enable).
-# We just import them in extension.py.
+# omni.kit.app is a kit-kernel module the resolver can't version-resolve, so it is
+# not listed. The rest must be declared: in headless runs they are not preloaded.
+[dependencies]
+"omni.ui" = {}
+"omni.usd" = {}
+"omni.replicator.core" = {}
 
 [[python.module]]
 name = "dvs_preview"

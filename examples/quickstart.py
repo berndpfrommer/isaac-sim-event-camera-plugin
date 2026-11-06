@@ -52,6 +52,9 @@ import torch
 
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
+# Open the Kit viewport window unless the user picked a visualizer / --headless.
+if not getattr(args, "headless", False) and not getattr(args, "visualizer", None):
+    args.visualizer = ["kit"]
 app_launcher = AppLauncher(args)
 simulation_app = app_launcher.app
 
@@ -138,7 +141,7 @@ def main():
         c.width = W0 + L + R
         c.height = H0 + T + Bm
     cfg.events.reinit_dvs.params["margin"] = margin
-    # config-driven: DVSCameraCfg(event_source='hdr') auto-requests HdrColor and
+    # config-driven: DVSCameraCfg(event_source='hdr') auto-requests rgb_hdr and
     # from_scene picks it up. --event_source overrides the config.
     if args.event_source is not None:
         for f in ("cam0", "cam1"):
@@ -149,8 +152,8 @@ def main():
     ):
         for f in ("cam0", "cam1"):
             c = getattr(cfg.scene, f)
-            if "HdrColor" not in c.data_types:
-                c.data_types = list(c.data_types) + ["HdrColor"]
+            if "rgb_hdr" not in c.data_types:
+                c.data_types = list(c.data_types) + ["rgb_hdr"]
     env = ManagerBasedRLEnv(cfg=cfg)
 
     # 2. One object bundles the stereo cameras + event processors + recorder.
@@ -174,7 +177,7 @@ def main():
     env.reset()
     env.step(actions)  # prime step
     prev = dvs.snapshot()
-    t_prev = float(env.sim.current_time)
+    t_prev = float(env.common_step_counter * env.step_dt)
 
     # 3. Main loop: step -> warp the gap -> emit events (all in warp_and_process).
     for _ in range(args.keyframes):
@@ -192,9 +195,10 @@ def main():
             break
         dvs.warp_and_process(prev, cur, K, t_prev, DT_FINE, frame_cb=frame_cb)
         prev = cur
-        t_prev = float(env.sim.current_time)
+        t_prev = float(env.common_step_counter * env.step_dt)
 
     # 4. Flush this (env, episode) to HDF5.
+    print("[quickstart] flushing episode to HDF5")
     dvs.flush(env_id=0, episode_idx=0)
     vw_rgb.release()
 

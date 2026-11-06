@@ -14,6 +14,7 @@ HDF5 layout (one file ``env{env_id}_ep{episode_idx}.h5`` per environment)::
     /<camera_name>/t   float64  (gzip)  timestamp (seconds)
     /<camera_name>/p   int8     (gzip)  polarity  (+1 = ON, -1 = OFF)
 """
+
 import os
 import threading
 from collections import defaultdict
@@ -25,6 +26,7 @@ import h5py
 
 class GeneralDVSRecorder:
     """Thread-safe recorder for multiple envs, multiple cameras, varying episodes."""
+
     def __init__(self, output_dir: str = "/tmp/dvs_dataset", compression="gzip"):
         self.output_dir = output_dir
         os.makedirs(self.output_dir, exist_ok=True)
@@ -38,8 +40,17 @@ class GeneralDVSRecorder:
         # Nested dictionary: env_id -> camera_name -> list of events
         self._events = defaultdict(lambda: defaultdict(list))
 
-    def record(self, camera_name: str, env_ids: torch.Tensor, xs: torch.Tensor, ys: torch.Tensor, ps: torch.Tensor, t: float):
-        if xs.numel() == 0: return
+    def record(
+        self,
+        camera_name: str,
+        env_ids: torch.Tensor,
+        xs: torch.Tensor,
+        ys: torch.Tensor,
+        ps: torch.Tensor,
+        t: float,
+    ):
+        if xs.numel() == 0:
+            return
 
         # One GPU->CPU transfer per array, then store whole array-chunks per env
         # (NO per-event Python loop). Chunks are concatenated lazily at flush.
@@ -49,30 +60,46 @@ class GeneralDVSRecorder:
         p_np = ps.cpu().numpy().astype(np.int8)
 
         with self._lock:
-            if e_np.size and e_np.min() == e_np.max():     # fast path: all events in one env (num_envs=1)
+            if (
+                e_np.size and e_np.min() == e_np.max()
+            ):  # fast path: all events in one env (num_envs=1)
                 self._events[int(e_np[0])][camera_name].append(
-                    (x_np, y_np, np.full(x_np.shape, t, np.float64), p_np))
+                    (x_np, y_np, np.full(x_np.shape, t, np.float64), p_np)
+                )
             else:
-                for e in np.unique(e_np):                   # group by env, still array-wise (no per-event loop)
+                for e in np.unique(
+                    e_np
+                ):  # group by env, still array-wise (no per-event loop)
                     m = e_np == e
                     self._events[int(e)][camera_name].append(
-                        (x_np[m], y_np[m], np.full(int(m.sum()), t, np.float64), p_np[m]))
+                        (
+                            x_np[m],
+                            y_np[m],
+                            np.full(int(m.sum()), t, np.float64),
+                            p_np[m],
+                        )
+                    )
 
     def flush_episode(self, env_id: int, episode_idx: int):
         """Flushes all cameras for a single environment to a single HDF5 file."""
         with self._lock:
             if env_id not in self._events or not self._events[env_id]:
+                print(
+                    f"[Recorder] No events to flush for Env {env_id} (Ep {episode_idx})"
+                )
+                print(f"have events: {self._events}")
                 return
 
             # Pop the environment's data out of the active buffer
             env_data = self._events.pop(env_id)
 
         filename = os.path.join(self.output_dir, f"env{env_id}_ep{episode_idx}.h5")
-
+        print(f"[Recorder] Flushing Env {env_id} (Ep {episode_idx}) -> {filename}")
         counts = {}
         with h5py.File(filename, "w") as f:
             for cam_name, chunks in env_data.items():
-                if not chunks: continue
+                if not chunks:
+                    continue
 
                 # Create a group for each camera in this environment
                 grp = f.create_group(cam_name)
@@ -94,8 +121,10 @@ class GeneralDVSRecorder:
                 self._write_blocked(grp, "p", ps)
 
         summary = ", ".join(f"{k}={v:,}" for k, v in counts.items())
-        print(f"[Recorder] Saved Env {env_id} (Ep {episode_idx}) w/ {len(env_data)} cameras "
-              f"[{summary}] comp={self.compression} -> {filename}")
+        print(
+            f"[Recorder] Saved Env {env_id} (Ep {episode_idx}) w/ {len(env_data)} cameras "
+            f"[{summary}] comp={self.compression} -> {filename}"
+        )
 
     def _write_blocked(self, grp, name, arr, block: int = 8_000_000):
         """Create a 1-D dataset and fill it in ``block``-sized slices."""
@@ -105,7 +134,12 @@ class GeneralDVSRecorder:
             return
         # compression requires chunked storage; uncompressed stays contiguous
         chunks = True if self.compression else None
-        ds = grp.create_dataset(name, shape=(n,), dtype=arr.dtype,
-                                compression=self.compression, chunks=chunks)
+        ds = grp.create_dataset(
+            name,
+            shape=(n,),
+            dtype=arr.dtype,
+            compression=self.compression,
+            chunks=chunks,
+        )
         for i in range(0, n, block):
-            ds[i:i + block] = arr[i:i + block]
+            ds[i : i + block] = arr[i : i + block]

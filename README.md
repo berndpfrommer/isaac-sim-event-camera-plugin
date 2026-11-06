@@ -64,7 +64,7 @@ Swap the camera cfg, render at a low keyframe rate, and warp each gap up to the 
 
 ```python
 # 1. In your scene cfg: swap CameraCfg → DVSCameraCfg (same args; it adds the
-#    HdrColor + rgb + motion_vectors + distance_to_image_plane (depth) annotators
+#    rgb_hdr + rgb + motion_vectors + distance_to_image_plane (depth) annotators
 #    the warp/events need).
 from dvs_gen.sensors import DVSCameraCfg
 my_cam = DVSCameraCfg(
@@ -107,8 +107,8 @@ from dvs_gen import DVSCamera, DVSCameraCfg, DVSEnvCfg     # Isaac-side
 from dvs_gen import GeneralDVSRecorder, BatchedMultiCamProcessor, bidir_warp_gap  # pure core
 ```
 
-- **`DVSCameraCfg`** — drop-in `CameraCfg` preset that auto-requests the annotators the event-camera pipeline needs (`HdrColor`, `rgb`, `motion_vectors`, `distance_to_image_plane`) and carries the contrast `threshold` (read by `from_scene` unless overridden).
-  - **HDR events** — set the `event_source` field on your `DVSCameraCfg` (in your scene cfg). Defaults to `"hdr"`: events come from the renderer's **linear** `HdrColor` buffer, so `log(intensity)` matches real DVS physics (pixels respond to linear light, not the ISP's gamma/tone-mapped `rgb`). Set `event_source="ldr"` for the tone-mapped `rgb` instead.
+- **`DVSCameraCfg`** — drop-in `CameraCfg` preset that auto-requests the annotators the event-camera pipeline needs (`rgb_hdr`, `rgb`, `motion_vectors`, `distance_to_image_plane`) and carries the contrast `threshold` (read by `from_scene` unless overridden).
+  - **HDR events** — set the `event_source` field on your `DVSCameraCfg` (in your scene cfg). Defaults to `"hdr"`: events come from the renderer's **linear** `rgb_hdr` buffer, so `log(intensity)` matches real DVS physics (pixels respond to linear light, not the ISP's gamma/tone-mapped `rgb`). Set `event_source="ldr"` for the tone-mapped `rgb` instead.
   - **Sensor noise** — real event cameras are noisy; set the `noise` field to a `DVSNoiseCfg` to add it (default `None` = ideal clean model). Models 
     - per-pixel threshold mismatch (`sigma_threshold`, `on_off_ratio`), 
     - leak events (`leak_rate_hz`), 

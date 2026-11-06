@@ -60,6 +60,9 @@ import torch
 
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
+# Open the Kit viewport window unless the user picked a visualizer / --headless.
+if not getattr(args, "headless", False) and not getattr(args, "visualizer", None):
+    args.visualizer = ["kit"]
 app_launcher = AppLauncher(args)
 simulation_app = app_launcher.app
 
@@ -124,7 +127,7 @@ def main():
         c.width = W0 + L + R
         c.height = H0 + T + B
     cfg.events.reinit_dvs.params["margin"] = margin           # shift principal point
-    # config-driven: DVSCameraCfg(event_source='hdr') auto-requests HdrColor and
+    # config-driven: DVSCameraCfg(event_source='hdr') auto-requests rgb_hdr and
     # from_scene picks it up. --event_source overrides the config.
     if args.event_source is not None:
         for f in ("cam0", "cam1"):
@@ -132,8 +135,8 @@ def main():
     if any(getattr(getattr(cfg.scene, f), "event_source", "ldr") == "hdr" for f in ("cam0", "cam1")):
         for f in ("cam0", "cam1"):
             c = getattr(cfg.scene, f)
-            if "HdrColor" not in c.data_types:
-                c.data_types = list(c.data_types) + ["HdrColor"]
+            if "rgb_hdr" not in c.data_types:
+                c.data_types = list(c.data_types) + ["rgb_hdr"]
 
     env = ManagerBasedRLEnv(cfg=cfg)
     os.makedirs(args.dir, exist_ok=True)
@@ -174,7 +177,7 @@ def main():
     open_rgb_writers(0)
     env.step(actions)                                       # prime: seed prev
     prev = dvs.snapshot()
-    t_prev = float(env.sim.current_time)
+    t_prev = float(env.common_step_counter * env.step_dt)
 
     print(f"[simulate_warp] render@{args.render_hz:.0f}Hz -> out@{OUT_HZ:.0f}Hz (K={K}); "
           f"saving to {args.dir}", flush=True)
@@ -214,7 +217,7 @@ def main():
         obs, _, terminated, truncated, _ = env.step(actions)
         cur = dvs.snapshot()
         tb = sync_now(); acc["render"] += tb - ta
-        t_cur = float(env.sim.current_time)
+        t_cur = float(env.common_step_counter * env.step_dt)
         # obs is the POST-step state, so the annotation carries t_cur (stamping it
         # t_prev mislabelled every pose one keyframe early).
         step_anno = parse_annotation(obs["policy"], t_cur)
@@ -240,7 +243,7 @@ def main():
             obs, _ = env.reset()
             env.step(actions)
             prev = dvs.snapshot()
-            t_prev = float(env.sim.current_time)
+            t_prev = float(env.common_step_counter * env.step_dt)
             continue
 
         # warp the gap (all cams+envs batched) and feed every frame to the DVS hooks

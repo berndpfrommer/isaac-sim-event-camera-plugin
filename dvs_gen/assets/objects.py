@@ -69,8 +69,11 @@ def reset_obstacles_random_sparse(
     angvel_range:  tuple[float, float] = (-2.0,  2.0),  # rad/s per axis
     seed:          int | None          = None,
 ) -> None:
-    num_envs_reset = len(env_ids)
     device = env.device
+    # Isaac Lab passes slice(None) (or None) when resetting all envs.
+    if env_ids is None or isinstance(env_ids, slice):
+        env_ids = torch.arange(env.num_envs, device=device)
+    num_envs_reset = len(env_ids)
     asset  = env.scene["DroppedObject"]
     rng    = np.random.default_rng(seed)
 

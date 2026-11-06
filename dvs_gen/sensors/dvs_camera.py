@@ -24,15 +24,16 @@ Example (warp pipeline)::
     from dvs_gen import DVSCamera
     dvs = DVSCamera.from_scene(env.scene, ["cam0", "cam1"], out_dir="/tmp/dvs")
     prev = dvs.snapshot()
-    t_prev = float(env.sim.current_time)
+    t_prev = float(env.common_step_counter * env.step_dt)
     while running:
         env.step(actions)
         cur = dvs.snapshot()
-        t_cur = float(env.sim.current_time)
+        t_cur = float(env.common_step_counter * env.step_dt)
         dvs.warp_and_process(prev, cur, K=8, t0=t_prev, dt_fine=1/1000)
         prev, t_prev = cur, t_cur
     dvs.flush(env_id=0, episode_idx=0)
 """
+
 from __future__ import annotations
 
 import torch
@@ -40,7 +41,12 @@ import torch
 from isaaclab.sensors import CameraCfg
 from isaaclab.utils import configclass
 
-from dvs_gen.dvs import GeneralDVSRecorder, BatchedMultiCamProcessor, DVSNoiseCfg, DVSNoiseModel
+from dvs_gen.dvs import (
+    GeneralDVSRecorder,
+    BatchedMultiCamProcessor,
+    DVSNoiseCfg,
+    DVSNoiseModel,
+)
 from dvs_gen.io.blur import MotionBlurAccumulator, MotionBlurCfg
 from dvs_gen.warp import bidir_warp_gap
 
@@ -60,7 +66,9 @@ def parse_margin(vals):
         return (v[0], v[0], v[0], v[0])
     if len(v) == 4:
         return (v[0], v[1], v[2], v[3])
-    raise ValueError("margin takes 1 value (all sides) or 4 values (left right top bottom)")
+    raise ValueError(
+        "margin takes 1 value (all sides) or 4 values (left right top bottom)"
+    )
 
 
 def crop_margin(img, margin):
@@ -74,7 +82,7 @@ def crop_margin(img, margin):
     if not (left or right or top or bottom):
         return img
     H, W = img.shape[-3], img.shape[-2]
-    return img[..., top:H - bottom, left:W - right, :]
+    return img[..., top : H - bottom, left : W - right, :]
 
 
 def tag_dvs_cameras(scene, names, threshold=0.15):
@@ -87,6 +95,7 @@ def tag_dvs_cameras(scene, names, threshold=0.15):
     try:
         import omni.usd
         from pxr import Sdf
+
         stage = omni.usd.get_context().get_stage()
         if stage is None:
             return
@@ -95,13 +104,19 @@ def tag_dvs_cameras(scene, names, threshold=0.15):
             # Resolved per-env prim paths; fall back to env paths + cfg suffix.
             paths = list(getattr(sensor, "prim_paths", None) or [])
             if not paths:
-                suffix = getattr(getattr(sensor, "cfg", None), "prim_path", "").split("}")[-1]
+                suffix = getattr(getattr(sensor, "cfg", None), "prim_path", "").split(
+                    "}"
+                )[-1]
                 paths = [ep + suffix for ep in getattr(scene, "env_prim_paths", [])]
             for p in paths:
                 prim = stage.GetPrimAtPath(p)
                 if prim and prim.IsValid():
-                    prim.CreateAttribute("dvs:preview", Sdf.ValueTypeNames.Bool).Set(True)
-                    prim.CreateAttribute("dvs:threshold", Sdf.ValueTypeNames.Float).Set(float(threshold))
+                    prim.CreateAttribute("dvs:preview", Sdf.ValueTypeNames.Bool).Set(
+                        True
+                    )
+                    prim.CreateAttribute("dvs:threshold", Sdf.ValueTypeNames.Float).Set(
+                        float(threshold)
+                    )
                     print(f"[dvs_gen] tagged {p} for GUI preview")
     except Exception as ex:
         print(f"[dvs_gen] tag_dvs_cameras failed: {ex}")
@@ -112,15 +127,20 @@ def _tagging_spawn(orig_func, threshold):
     ``dvs_preview`` GUI extension (custom USD attrs ``dvs:preview`` / ``dvs:threshold``).
     The spawner signature varies across Isaac versions, so pass *args/**kwargs through.
     """
+
     def _spawn(prim_path, cfg, *args, **kwargs):
         prim = orig_func(prim_path, cfg, *args, **kwargs)
         try:
             from pxr import Sdf
+
             prim.CreateAttribute("dvs:preview", Sdf.ValueTypeNames.Bool).Set(True)
-            prim.CreateAttribute("dvs:threshold", Sdf.ValueTypeNames.Float).Set(float(threshold))
+            prim.CreateAttribute("dvs:threshold", Sdf.ValueTypeNames.Float).Set(
+                float(threshold)
+            )
         except Exception:
-            pass        # tagging is best-effort; never block camera spawning
+            pass  # tagging is best-effort; never block camera spawning
         return prim
+
     _spawn._dvs_tagged = True
     return _spawn
 
@@ -143,7 +163,7 @@ class DVSCameraCfg(CameraCfg):
     #: auto-shows a live red/blue event window for this camera in the Isaac Lab GUI.
     gui_preview: bool = True
     #: Intensity source for the DVS event model. ``"hdr"`` (default) uses the linear
-    #: ``HdrColor`` buffer so ``log(intensity)`` is physically correct (no ISP
+    #: ``rgb_hdr`` buffer so ``log(intensity)`` is physically correct (no ISP
     #: gamma/tone-map warping); ``"ldr"`` uses the tone-mapped ``rgb`` buffer.
     event_source: str = "hdr"
     #: Optional sensor-noise model (per-pixel threshold mismatch, background/leak/shot
@@ -169,7 +189,7 @@ class DVSCameraCfg(CameraCfg):
         if self.enable_warp:
             required.append(DEPTH_ANNOTATOR)
         if self.event_source == "hdr":
-            required.append("HdrColor")
+            required.append("rgb_hdr")
         dt = list(self.data_types) if self.data_types else []
         for t in required:
             if t not in dt:
@@ -178,9 +198,12 @@ class DVSCameraCfg(CameraCfg):
 
         # Tag the spawned camera prim (custom USD attrs) so the optional
         # `dvs_preview` Kit extension can find it and pop a live event window.
-        if (self.gui_preview and getattr(self, "spawn", None) is not None
-                and getattr(self.spawn, "func", None) is not None
-                and not getattr(self.spawn.func, "_dvs_tagged", False)):
+        if (
+            self.gui_preview
+            and getattr(self, "spawn", None) is not None
+            and getattr(self.spawn, "func", None) is not None
+            and not getattr(self.spawn.func, "_dvs_tagged", False)
+        ):
             self.spawn.func = _tagging_spawn(self.spawn.func, self.threshold)
 
 
@@ -192,10 +215,22 @@ class DVSCamera:
     under ``DVS/<camera_name>``.
     """
 
-    def __init__(self, scene, names, recorder, processors, *,
-                 enable_warp=True, composite="b_primary", depth_key=DEPTH_ANNOTATOR,
-                 margin=(0, 0, 0, 0), event_source="ldr", blur_cfgs=None, hole_fill=None,
-                 mv_dilate=0):
+    def __init__(
+        self,
+        scene,
+        names,
+        recorder,
+        processors,
+        *,
+        enable_warp=True,
+        composite="b_primary",
+        depth_key=DEPTH_ANNOTATOR,
+        margin=(0, 0, 0, 0),
+        event_source="ldr",
+        blur_cfgs=None,
+        hole_fill=None,
+        mv_dilate=0,
+    ):
         self.scene = scene
         self.names = list(names)
         self.recorder = recorder
@@ -203,7 +238,7 @@ class DVSCamera:
         self.enable_warp = enable_warp
         self.composite = composite
         self.depth_key = depth_key
-        # "ldr" = tone-mapped rgb; "hdr" = linear HdrColor (physically correct events).
+        # "ldr" = tone-mapped rgb; "hdr" = linear rgb_hdr (physically correct events).
         # In "hdr" mode the whole warp/event/video path runs on the HDR buffer and
         # display_u8() tone-maps it for viewable RGB/GT output.
         self.event_source = event_source
@@ -227,10 +262,23 @@ class DVSCamera:
 
     # ── construction ──────────────────────────────────────────
     @classmethod
-    def from_scene(cls, scene, names=("cam0", "cam1"), *, out_dir="/tmp/dvs_dataset",
-                   threshold=None, composite="b_primary", enable_warp=True,
-                   group_prefix="DVS", margin=(0, 0, 0, 0), compression="gzip",
-                   event_source=None, hole_fill=None, mv_dilate=0, antialiasing="Off"):
+    def from_scene(
+        cls,
+        scene,
+        names=("cam0", "cam1"),
+        *,
+        out_dir="/tmp/dvs_dataset",
+        threshold=None,
+        composite="b_primary",
+        enable_warp=True,
+        group_prefix="DVS",
+        margin=(0, 0, 0, 0),
+        compression="gzip",
+        event_source=None,
+        hole_fill=None,
+        mv_dilate=0,
+        antialiasing="Off",
+    ):
         """Build a recorder + one processor per camera and wrap ``scene``'s cameras.
 
         ``names`` are the camera keys in the scene (``scene[name]``); the events
@@ -258,18 +306,34 @@ class DVSCamera:
         if antialiasing is not None:
             try:
                 import omni.replicator.core as rep
+
                 rep.settings.set_render_rtx_realtime(antialiasing=antialiasing)
-                print(f"\033[32m[DVSCamera] RTX antialiasing = {antialiasing} "
-                      f"(no cross-frame accumulation for event gen)\033[0m", flush=True)
+                print(
+                    f"\033[32m[DVSCamera] RTX antialiasing = {antialiasing} "
+                    f"(no cross-frame accumulation for event gen)\033[0m",
+                    flush=True,
+                )
             except Exception as ex:
-                print(f"[DVSCamera] could not set antialiasing={antialiasing!r}: {ex}", flush=True)
-        thr = {n: threshold if threshold is not None
-               else getattr(getattr(scene[n], "cfg", None), "threshold", 0.15)
-               for n in names}
+                print(
+                    f"[DVSCamera] could not set antialiasing={antialiasing!r}: {ex}",
+                    flush=True,
+                )
+        thr = {
+            n: (
+                threshold
+                if threshold is not None
+                else getattr(getattr(scene[n], "cfg", None), "threshold", 0.15)
+            )
+            for n in names
+        }
         if event_source is None:
-            event_source = getattr(getattr(scene[names[0]], "cfg", None), "event_source", "ldr")
+            event_source = getattr(
+                getattr(scene[names[0]], "cfg", None), "event_source", "ldr"
+            )
         if event_source == "hdr":
-            print(f"\033[32m[DVSCamera] event_source=hdr (linear HDR)\033[0m", flush=True)  # green
+            print(
+                f"\033[32m[DVSCamera] event_source=hdr (linear HDR)\033[0m", flush=True
+            )  # green
         else:
             print(f"[DVSCamera] event_source=ldr (tone-mapped LDR)", flush=True)
         recorder = GeneralDVSRecorder(out_dir, compression=compression)
@@ -277,32 +341,59 @@ class DVSCamera:
         # so different cameras can have different noise (or one noisy, one clean). Seed is
         # offset per camera so even identical cfgs give distinct hot pixels / noise events.
         import dataclasses
+
         procs = []
         for i, n in enumerate(names):
             ncfg = getattr(getattr(scene[n], "cfg", None), "noise", None)
-            nm = DVSNoiseModel(dataclasses.replace(ncfg, seed=ncfg.seed + i), thr[n]) if ncfg is not None else None
+            nm = (
+                DVSNoiseModel(dataclasses.replace(ncfg, seed=ncfg.seed + i), thr[n])
+                if ncfg is not None
+                else None
+            )
             if nm is not None:
-                print(f"\033[33m[DVSCamera] {n}: sensor noise ON "
-                      f"(mismatch + background/leak/shot + hot + refractory)\033[0m", flush=True)
-            procs.append(BatchedMultiCamProcessor(recorder, f"{group_prefix}/{n}", thr[n], noise=nm))
+                print(
+                    f"\033[33m[DVSCamera] {n}: sensor noise ON "
+                    f"(mismatch + background/leak/shot + hot + refractory)\033[0m",
+                    flush=True,
+                )
+            procs.append(
+                BatchedMultiCamProcessor(
+                    recorder, f"{group_prefix}/{n}", thr[n], noise=nm
+                )
+            )
         # config-driven motion blur: EACH camera reads its OWN MotionBlurCfg (None = off).
         blur_cfgs = {}
         for n in names:
             bc = getattr(getattr(scene[n], "cfg", None), "motion_blur", None)
             if bc is not None:
                 blur_cfgs[n] = bc
-                mode = "events FROM blurred frames" if getattr(bc, "feed_events", False) \
-                       else "sharp events + blurred video"
-                print(f"\033[36m[DVSCamera] {n}: motion blur ON "
-                      f"(exposure {bc.exposure_ms:.1f}ms, {mode})\033[0m", flush=True)
+                mode = (
+                    "events FROM blurred frames"
+                    if getattr(bc, "feed_events", False)
+                    else "sharp events + blurred video"
+                )
+                print(
+                    f"\033[36m[DVSCamera] {n}: motion blur ON "
+                    f"(exposure {bc.exposure_ms:.1f}ms, {mode})\033[0m",
+                    flush=True,
+                )
         # Tag the (already-spawned) camera prims so the dvs_preview GUI extension
         # can find them — reliable here because the prims exist by now.
         for n in names:
             tag_dvs_cameras(scene, [n], thr[n])
-        return cls(scene, names, recorder, procs,
-                   enable_warp=enable_warp, composite=composite, margin=margin,
-                   event_source=event_source, blur_cfgs=blur_cfgs, hole_fill=hole_fill,
-                   mv_dilate=mv_dilate)
+        return cls(
+            scene,
+            names,
+            recorder,
+            procs,
+            enable_warp=enable_warp,
+            composite=composite,
+            margin=margin,
+            event_source=event_source,
+            blur_cfgs=blur_cfgs,
+            hole_fill=hole_fill,
+            mv_dilate=mv_dilate,
+        )
 
     def _crop(self, x):
         return crop_margin(x, self.margin)
@@ -325,9 +416,11 @@ class DVSCamera:
         for name in self.names:
             o = self.scene[name].data.output
             if self.event_source == "hdr":
-                rgb = o["HdrColor"][..., :3].float().clone()   # linear radiance -> correct log-intensity
+                rgb = (
+                    o["rgb_hdr"][..., :3].float().clone()
+                )  # linear radiance -> correct log-intensity
             else:
-                rgb = o["rgb"].float().clone()                 # tone-mapped LDR
+                rgb = o["rgb"].float().clone()  # tone-mapped LDR
             mv = torch.nan_to_num(o["motion_vectors"][..., :2].float())
             depth = self._depth(o) if self.enable_warp else None
             snap[name] = (rgb, mv, depth)
@@ -344,8 +437,8 @@ class DVSCamera:
         if self.event_source == "hdr":
             a = a.clamp(0.0, 1.0) * 255.0
         else:
-            a = (a / 255.0) if float(a.max()) > 1.001 else a     # -> [0,1]
-            a = a.clamp(0.0, 1.0) ** (1.0 / 2.2) * 255.0         # sRGB-ish gamma (brighten)
+            a = (a / 255.0) if float(a.max()) > 1.001 else a  # -> [0,1]
+            a = a.clamp(0.0, 1.0) ** (1.0 / 2.2) * 255.0  # sRGB-ish gamma (brighten)
         return a.clamp(0, 255).byte().cpu().numpy()
 
     # ── event generation ──────────────────────────────────────
@@ -362,9 +455,11 @@ class DVSCamera:
         for name, proc in zip(self.names, self.procs):
             o = self.scene[name].data.output
             if self.event_source == "hdr":
-                f = o["HdrColor"][..., :3].float()   # linear radiance -> correct log-intensity
+                f = o["rgb_hdr"][
+                    ..., :3
+                ].float()  # linear radiance -> correct log-intensity
             else:
-                f = o["rgb"].float()                 # tone-mapped LDR
+                f = o["rgb"].float()  # tone-mapped LDR
             f = self._crop(f)
             if self.blur_cfgs.get(name) is not None and dt is not None and dt > 0:
                 self._feed(name, proc, f, t, dt, blur_cb)
@@ -387,6 +482,7 @@ class DVSCamera:
 
         Returns the number of frames fed (``K``).
         """
+        print(f"Warping and processing keyframe gap starting at t0={t0} with K={K}")
         names = self.names
         # fraction 0: the real keyframe (cropped to the valid region)
         frame0 = {n: self._crop(prev[n][0]) for n in names}
@@ -411,15 +507,27 @@ class DVSCamera:
         # warp runs on the FULL (over-rendered) frames so borders have real
         # neighbours; only the cropped valid region becomes events / RGB.
         hf = self.hole_fill
-        if hf == "bg":                             # auto: brightest value = uniform bright backdrop
+        if hf == "bg":  # auto: brightest value = uniform bright backdrop
             hf = float(max(A.max(), B.max()))
-        mids = bidir_warp_gap(A, B, mvA, mvB, K, self.composite, depthA=dA, depthB=dB,
-                              hole_fill=hf, mv_dilate=self.mv_dilate)
+        mids = bidir_warp_gap(
+            A,
+            B,
+            mvA,
+            mvB,
+            K,
+            self.composite,
+            depthA=dA,
+            depthB=dB,
+            hole_fill=hf,
+            mv_dilate=self.mv_dilate,
+        )
         for i in range(K - 1):
             t = t0 + (i + 1) * dt_fine
             frame_dict = {}
             for ci, (name, proc) in enumerate(zip(names, self.procs)):
-                f = self._crop(mids[i][ci * Nenv:(ci + 1) * Nenv])   # split cameras, crop margin
+                f = self._crop(
+                    mids[i][ci * Nenv : (ci + 1) * Nenv]
+                )  # split cameras, crop margin
                 self._feed(name, proc, f, t, dt_fine, blur_cb)
                 frame_dict[name] = f
             if frame_cb is not None:
@@ -445,16 +553,16 @@ class DVSCamera:
         if not feed_ev:
             proc(f, t)
         acc = self._blur_accs.get(name)
-        if acc is None:                              # lazy: window needs dt_fine
+        if acc is None:  # lazy: window needs dt_fine
             win = max(1, int(round((bc.exposure_ms / 1000.0) / dt_fine)))
             acc = MotionBlurAccumulator(win)
             self._blur_accs[name] = acc
-        avg = acc.add(f)                             # full batch (N,H,W,C)
+        avg = acc.add(f)  # full batch (N,H,W,C)
         if avg is not None:
             if feed_ev:
-                proc(avg, t)                         # events from the blurred frame
+                proc(avg, t)  # events from the blurred frame
             if blur_cb is not None:
-                blur_cb({name: avg[0]})              # env-0 for the video output
+                blur_cb({name: avg[0]})  # env-0 for the video output
 
     def flush_blur(self, blur_cb):
         """Emit any partial exposure windows to the VIDEO output (e.g. at episode
@@ -477,4 +585,5 @@ class DVSCamera:
 
     def flush(self, env_id: int, episode_idx: int):
         """Write the buffered events for one (env, episode) to HDF5."""
+        print("flushing...")
         self.recorder.flush_episode(env_id, episode_idx)
