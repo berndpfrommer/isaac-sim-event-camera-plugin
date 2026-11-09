@@ -58,6 +58,13 @@ One command — drop an object, render at 125 Hz, warp to 1000 Hz, emit events, 
 python examples/quickstart.py --margin 20 --enable_cameras --kit_args "--ext-folder $PWD/extension --enable dvs_preview"
 ```
 
+For a single camera observing a white square rotating counterclockwise on a
+black background, run `python single_cam.py`. By default it
+records five simulation seconds (one revolution); `--render_hz` controls the
+keyframe rate and `--keyframes` can override the recording length. To use
+another rigid primitive, replace `shape_spawn` in `configure_rotating_shape`,
+keeping its rigid-body and material properties.
+
 ### Example: migrate an RGB camera to an event camera
 
 Swap the camera cfg, render at a low keyframe rate, and warp each gap up to the event rate in your loop. Your camera placement / robot setup don't change.

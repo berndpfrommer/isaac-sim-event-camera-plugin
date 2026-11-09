@@ -1,19 +1,20 @@
 """
 single_cam.py
 =============
-Smallest end-to-end example: drop a YCB object, render keyframes at ``render_hz``,
-warp them up ``--warp``× with motion vectors (events come out at render_hz × warp),
-turn the high-rate stream into DVS events, and write everything to ``--dir``:
+Render a white square rotating counterclockwise against black. It completes one
+revolution in five simulation seconds. Keyframes at ``render_hz`` are warped
+``--warp``×, converted to DVS events, and written to ``--dir``:
 
     env0_ep0.h5        DVS events (groups DVS/cam0; x,y,t,p)
     rgb_stereo.mp4     synthesised RGB, cam0
-    events_stereo.mp4  the DVS events, cam0
+    events.mp4         the DVS events, cam0
 
 The whole DVS pipeline is the four ``dvs.*`` calls below — everything else is just
 stepping the sim and writing videos.
 """
 
 import argparse
+import math
 import os
 
 parser = argparse.ArgumentParser(
@@ -26,7 +27,8 @@ parser.add_argument(
     "--warp", type=int, default=8, help="warp multiplier K (events at render_hz*K)"
 )
 parser.add_argument(
-    "--keyframes", type=int, default=120, help="number of keyframes to simulate"
+    "--keyframes", type=int, default=None,
+    help="number of keyframes to simulate (default: five seconds at render_hz)",
 )
 parser.add_argument("--dir", type=str, default="/tmp/dvs_quickstart")
 parser.add_argument(
@@ -52,16 +54,27 @@ import torch
 
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
+if not math.isfinite(args.render_hz) or args.render_hz <= 0:
+    parser.error("--render_hz must be positive and finite")
+if args.warp <= 0:
+    parser.error("--warp must be positive")
+if args.keyframes is not None and args.keyframes <= 0:
+    parser.error("--keyframes must be positive")
+if args.keyframes is None:
+    args.keyframes = math.ceil(5.0 * args.render_hz)
 # Open the Kit viewport window unless the user picked a visualizer / --headless.
 if not getattr(args, "headless", False) and not getattr(args, "visualizer", None):
     args.visualizer = ["kit"]
-app_launcher = AppLauncher(args)
+app_launcher = AppLauncher(args, enable_cameras=True)
 simulation_app = app_launcher.app
 
 import cv2
 import h5py
 import numpy as np
 from isaaclab.envs import ManagerBasedRLEnv
+from isaaclab.assets import AssetBaseCfg, RigidObjectCfg
+import isaaclab.sim as sim_utils
+from isaaclab_physx.sim.schemas import PhysxRigidBodyCfg
 
 from dvs_gen.env import DVSEnvCfg
 from dvs_gen.sensors import DVSCamera, parse_margin
@@ -71,6 +84,41 @@ K = args.warp  # warp multiplier
 DT_KEY = 1.0 / args.render_hz
 DT_FINE = DT_KEY / K
 OUT_HZ = args.render_hz * K  # effective event rate (for video fps)
+PLAYBACK_HZ = max(1, int(round(OUT_HZ / 20)))
+ROTATION_PERIOD_S = 5.0
+
+
+def configure_rotating_shape(cfg):
+    """Replace only the shape spawner to use another rigid geometric primitive."""
+    cfg.scene.cam0.offset.pos = (0.0, -0.7, 1.8)
+    cfg.scene.cam0.offset.rot = (2 ** -0.5, 0.0, 0.0, 2 ** -0.5)
+    cfg.scene.cam0.offset.convention = "opengl"
+    shape_spawn = sim_utils.CuboidCfg(
+        size=(0.6, 0.01, 0.6),
+        rigid_props=PhysxRigidBodyCfg(disable_gravity=True, angular_damping=0.0),
+        mass_props=sim_utils.MassPropertiesCfg(mass=0.4),
+        visual_material=sim_utils.PreviewSurfaceCfg(
+            diffuse_color=(1.0, 1.0, 1.0),
+            emissive_color=(1.0, 1.0, 1.0),
+            roughness=1.0,
+        ),
+    )
+    cfg.scene.DroppedObject = RigidObjectCfg(
+        prim_path="{ENV_REGEX_NS}/DroppedObject",
+        spawn=shape_spawn,
+        init_state=RigidObjectCfg.InitialStateCfg(
+            pos=(0.0, 0.8, 1.8),
+            # The camera looks along +Y, so -Y is counterclockwise in its image.
+            ang_vel=(0.0, -2.0 * math.pi / ROTATION_PERIOD_S, 0.0),
+        ),
+    )
+    cfg.scene.dome_light = AssetBaseCfg(
+        prim_path="/World/BackgroundDomeLight",
+        spawn=sim_utils.DomeLightCfg(intensity=1000.0, visible_in_primary_ray=False),
+    )
+    cfg.events.randomize_background = None
+    cfg.events.drop_object = None
+    cfg.terminations.object_dropped = None
 
 
 def render_event_video(
@@ -123,12 +171,17 @@ def render_event_video(
 def main():
     os.makedirs(args.dir, exist_ok=True)
 
-    # 1. Build the default env, retuned to the keyframe rate, single env.
+    # 1. Build the single-camera env, retuned to the keyframe rate.
     cfg = DVSEnvCfg()
+    configure_rotating_shape(cfg)
     cfg.scene.num_envs = 1
     cfg.sim.device = args.device
     cfg.sim.dt = DT_KEY
     cfg.sim.render_interval = 1
+    # Keep the rendered primitive in sync with its physics transform.
+    cfg.sim.use_fabric = False
+    # Account for the prime step and avoid auto-reset at the last keyframe.
+    cfg.episode_length_s = (args.keyframes + 2) * DT_KEY
     # Over-render `margin` pixels per side; they get cropped off so the saved
     # RGB/events are artifact-free at the borders (principal point is shifted so
     # the cropped W0xH0 view matches the calibration exactly).
@@ -169,7 +222,7 @@ def main():
     # Stereo RGB video writer: cam0 (20x slow-mo to be watchable).
     W, H = W0, H0  # cropped (output) size
     vw_rgb = H264Writer(
-        os.path.join(args.dir, "rgb_stereo.mp4"), W, H, int(round(OUT_HZ / 20))
+        os.path.join(args.dir, "rgb_stereo.mp4"), W, H, PLAYBACK_HZ
     )
 
     def frame_cb(_i, frames):
@@ -180,21 +233,32 @@ def main():
 
     actions = torch.zeros((env.num_envs, 0), device=env.device)
     env.reset()
+    env.scene["cam0"].set_world_poses_from_view(
+        eyes=torch.tensor([[0.0, -0.7, 1.8]], device=env.device),
+        targets=torch.tensor([[0.0, 0.8, 1.8]], device=env.device),
+    )
+    shape = env.scene["DroppedObject"]
+    shape.write_root_velocity_to_sim(shape.data.default_root_state[:, 7:13].clone())
+    # Headless Kit may otherwise skip its app loop, leaving RTX frames stale.
+    if getattr(args, "headless", False):
+        for _ in range(3):
+            simulation_app.update()
     env.step(actions)  # prime step
+    if getattr(args, "headless", False):
+        simulation_app.update()
     prev = dvs.snapshot()
     t_prev = float(env.common_step_counter * env.step_dt)
 
     # 3. Main loop: step -> warp the gap -> emit events (all in warp_and_process).
     for _ in range(args.keyframes):
         _, _, terminated, truncated, _ = env.step(actions)
+        if getattr(args, "headless", False):
+            simulation_app.update()
         cur = dvs.snapshot()
         if bool(torch.logical_or(terminated, truncated).any()):
-            # The env auto-reset inside step: the object teleported back to its
-            # spawn pose and the reset event re-randomized the background. Stop
-            # recording HERE so the episode file holds one continuous drop with
-            # one background — warping across the jump would fabricate events.
+            # Never warp across an automatic reset.
             print(
-                "[quickstart] episode ended (object dropped) — stopping recording",
+                "[quickstart] episode ended — stopping recording",
                 flush=True,
             )
             break
@@ -215,14 +279,14 @@ def main():
         os.path.join(args.dir, "events.mp4"),
         H=H,
         W=W,
-        fps=int(round(OUT_HZ / 20)),
+        fps=PLAYBACK_HZ,
         sample_hz=OUT_HZ,
     )
     print(
         f"[quickstart] done -> {args.dir}\n"
         f"  events : {h5_path}  (groups DVS/cam0)\n"
         f"  rgb    : rgb_stereo.mp4     (cam0)\n"
-        f"  events : events_stereo.mp4  (cam0)",
+        f"  events : events.mp4         (cam0)",
         flush=True,
     )
     env.close()
