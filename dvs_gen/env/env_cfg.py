@@ -19,7 +19,7 @@ from isaaclab.managers import (
 )
 import isaaclab.envs.mdp as mdp
 
-from .events import MyEventCfg
+from .single_events import MyEventCfg
 from .terminations import MyTerminationCfg
 from .scene import MySceneCfg
 from .observation import MyObsCfg
@@ -38,6 +38,7 @@ class MyRewardCfg:
     # empty = reward is always 0.0
     pass
 
+
 @configclass
 class MyEnvCfg(ManagerBasedRLEnvCfg):
 
@@ -54,24 +55,24 @@ class MyEnvCfg(ManagerBasedRLEnvCfg):
     # ── scene ─────────────────────────────────────────────────
     scene: MySceneCfg = MySceneCfg()
 
-    terminations: MyTerminationCfg        = MyTerminationCfg()   # ← new
+    terminations: MyTerminationCfg = MyTerminationCfg()  # ← new
 
     # ── events (includes background randomization) ────────────
     events: MyEventCfg = MyEventCfg()
-    observations: MyObsCfg        = MyObsCfg()
-    actions:      MyActionCfg     = MyActionCfg()
-    rewards:      MyRewardCfg     = MyRewardCfg()
+    observations: MyObsCfg = MyObsCfg()
+    actions: MyActionCfg = MyActionCfg()
+    rewards: MyRewardCfg = MyRewardCfg()
     # ── episode & action ──────────────────────────────────────
     episode_length_s: float = 3.0
-    decimation:       int   = 1
+    decimation: int = 1
 
     # ── DVS-specific ──────────────────────────────────────────
-    dvs_threshold:    float = 0.15
+    dvs_threshold: float = 0.15
     dvs_pixel_size_um: float = 15.0
 
     def __post_init__(self):
-        self.sim.dt             = 0.001              # 1k Hz physics
-        self.sim.render_interval = self.decimation   # 1k Hz policy
+        self.sim.dt = 0.001  # 1k Hz physics
+        self.sim.render_interval = self.decimation  # 1k Hz policy
         self.sim.physics_material = sim_utils.RigidBodyMaterialCfg(
             friction_combine_mode="multiply",
             restitution_combine_mode="multiply",
