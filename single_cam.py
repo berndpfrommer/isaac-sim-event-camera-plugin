@@ -73,7 +73,7 @@ DT_FINE = DT_KEY / K
 OUT_HZ = args.render_hz * K  # effective event rate (for video fps)
 
 
-def render_stereo_event_video(
+def render_event_video(
     h5_path,
     out_path,
     cams=("cam0",),
@@ -83,7 +83,7 @@ def render_stereo_event_video(
     sample_hz=None,
     win=None,
 ):
-    """Bin both cameras' events into side-by-side frames (red = ON, blue = OFF) -> mp4.
+    """render events(red = ON, blue = OFF) -> mp4.
 
     ``sample_hz`` = frame sampling rate in SIM time (default: same as ``fps`` =
     real-time playback); ``fps`` = playback rate of the mp4. Passing the RGB
@@ -105,6 +105,7 @@ def render_stereo_event_video(
         }
     tmin = min(d[2].min() for d in data.values())
     tmax = max(d[2].max() for d in data.values())
+    print("found events in range: {} - {}".format(tmin, tmax))
     vw = H264Writer(out_path, W * len(data), H, fps)
     for tc in np.arange(tmin, tmax, 1.0 / sample_hz):
         panes = []
@@ -209,9 +210,9 @@ def main():
     h5_path = os.path.join(args.dir, "env0_ep0.h5")
     # Same sampling (one frame per fine frame) and playback rate as the RGB video,
     # so rgb_stereo.mp4 and events_stereo.mp4 run frame-for-frame in sync.
-    render_stereo_event_video(
+    render_event_video(
         h5_path,
-        os.path.join(args.dir, "events_stereo.mp4"),
+        os.path.join(args.dir, "events.mp4"),
         H=H,
         W=W,
         fps=int(round(OUT_HZ / 20)),
